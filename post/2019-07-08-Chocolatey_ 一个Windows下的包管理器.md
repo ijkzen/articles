@@ -3,10 +3,6 @@ title: Chocolatey --- Windows下高权限的包管理器
 categories: tool
 ---
 
-
-  
-## Chocolatey
-
 ## 安装要求
 
 * Windows 7 以上 或 Windows Server 2003以上
