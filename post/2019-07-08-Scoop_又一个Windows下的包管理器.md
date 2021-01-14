@@ -5,7 +5,7 @@ categories: tool
 
 
 
-之前介绍Chocolatey这个在Windows下的包管理器，在使用了一段时间后发现了一些问题：
+之前使用Chocolatey这个在Windows下的包管理器，在使用了一段时间后发现了一些问题：
 
 1. 软件没有集中安装在一个目录下
 2. 软件所安装的目录下文件无法编辑
