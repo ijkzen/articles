@@ -206,60 +206,496 @@ public void onDraw(Canvas c) {
 
 关于事件分发，`NestedScrollingChild`，`NestedScrollingParent`之间的关系极为重要；
 
-这两个接口事关嵌套滚动；
-
-### ScrollingView
+### NestedScrollingChild
 
 ```java
-// 这个接口主要是提供了关于滚动条的一些API
-// 这些API的返回值都是同一个单位
-// 滚动条分为两个部分：滚动长条和滚动短条
-public interface ScrollingView {
+public interface NestedScrollingChild {
     /**
-     *  水平滚动条的范围
-     *  滚动长条的逻辑长度
-     *  默认值是视图的宽度
+     * 设置是否支持嵌套滑动
      */
-    int computeHorizontalScrollRange();
+    void setNestedScrollingEnabled(boolean enabled);
 
     /**
-     *  滚动短条的起始位置到滚动长条的起始位置的距离，X轴
+     * 返回是否支持嵌套滑动的状态
      */
-    int computeHorizontalScrollOffset();
+    boolean isNestedScrollingEnabled();
 
     /**
-     * 滚动短条的逻辑长度
-     * 默认值是视图宽度
+     * 当找到一个支持嵌套滑动的父视图且当前视图支持此滑动方向，返回true
+     * 传参是
+     * SCROLL_AXIS_NONE：无坐标轴
+     * SCROLL_AXIS_HORIZONTAL：水平坐标轴
+     * SCROLL_AXIS_VERTICAL：垂直坐标轴
      */
-    int computeHorizontalScrollExtent();
+    boolean startNestedScroll(@ScrollAxis int axes);
 
     /**
-     *  垂直滚动条的范围
-     *  滚动长条的逻辑长度
-     *  默认值是视图的高度
+     * 停止嵌套滑动
      */
-    int computeVerticalScrollRange();
+    void stopNestedScroll();
 
     /**
-     *  滚动短条的起始位置到滚动长条的起始位置的距离，Y轴
+     * 如果当前视图有一个支持嵌套滑动的父视图，返回true
      */
-    int computeVerticalScrollOffset();
+    boolean hasNestedScrollingParent();
 
     /**
-     * 滚动短条的逻辑长度
-     * 默认值是视图高度
+     * 在当前视图处理了滑动之后继续分配滑动操作 (一般在自己处理滑动之后，给NestedScrollingParent机会处理剩余的滑动距离)
+     * @param dxConsumed 已经消耗了的x轴滑动距离
+     * @param dyConsumed 已经消耗了的y轴滑动距离
+     * @param dxUnconsumed 未消耗的x轴滑动距离
+     * @param dyUnconsumed 未消耗的y轴滑动距离
+     * @param offsetInWindow 可选参数，可以为null。为输出参数，获取预处理操作使当前view的位置偏移(offsetInWindow[0]和offsetInWindow[1]分别为x轴和y轴偏移)
+     * @return 当前视图是否消费了滑动事件
      */
-    int computeVerticalScrollExtent();
+    boolean dispatchNestedScroll(int dxConsumed, int dyConsumed,
+            int dxUnconsumed, int dyUnconsumed, @Nullable int[] offsetInWindow);
+
+    /**
+     * 当前视图开始滑动处理之前，分配预处理操作（一般为询问NestedScrollingParent是否消耗部分滑动距离）
+     * @param dx 当前这一步滑动的x轴总距离
+     * @param dy 当前这一步滑动的y轴总距离
+     * @param consumed 预处理操作消耗掉的距离（此为输出参数，consumed[0]为预处理操作消耗掉的x轴距离，consumed[1]为预处理操作消耗掉的y轴距离）
+     * @param offsetInWindow 可选参数，可以为null。为输出参数，获取预处理操作使当前view的位置偏移(offsetInWindow[0]和offsetInWindow[1]分别为x轴和y轴偏移)
+     * @return 父视图是否消耗了部分或者全部滑动距离
+     */
+    boolean dispatchNestedPreScroll(int dx, int dy, @Nullable int[] consumed,
+            @Nullable int[] offsetInWindow);
+
+    /**
+     * 分发快速滑动事件到父视图
+     *
+     * @param velocityX 水平速度
+     * @param velocityY 垂直速度
+     * @param consumed 子视图是否消费了快速滑动事件
+     * @return 父视图是否消费了剩余的快速滑动事件
+     */
+    boolean dispatchNestedFling(float velocityX, float velocityY, boolean consumed);
+
+    /**
+     * 在当前NestedScrollingChild处理fling事件之前进行预处理(一般询问NestedScrollingParent是否处理消耗此次fling)
+     * @param velocityX x轴速度
+     * @param velocityY y轴速度
+     * @return 父视图是否处理消耗了此次fling
+     */
+    boolean dispatchNestedPreFling(float velocityX, float velocityY);
 }
 
 ```
 
+`NestedScrollingChild2`继承了`NestedScrollingChild`接口，为`NestedScrollingChild`中所有的接口添加了`type`这个参数，这个参数有两个值：
+
+```java
+    /**
+     * 由用户操作引起的
+     */
+    public static final int TYPE_TOUCH = 0;
+
+    /**
+     * 非用户操作引起的，一般是快速滑动事件，也就是当我们快速滑动一个列表，
+     * 虽然手已经离开屏幕，列表仍然在滚动
+     */
+    public static final int TYPE_NON_TOUCH = 1;
+```
+
+`NestedScrollingChild3`继承了`NestedScrollingChild2`接口，并且添加了一个新的方法：
+
+```java
+    /**
+     * 在当前视图处理了滑动之后继续分配滑动操作 (一般在自己处理滑动之后，给NestedScrollingParent机会处理剩余的滑动距离)
+     *
+     * @param dxConsumed 已经消耗了的x轴滑动距离
+     * @param dyConsumed 已经消耗了的y轴滑动距离
+     * @param dxUnconsumed 未消耗的x轴滑动距离
+     * @param dyUnconsumed 未消耗的y轴滑动距离
+     * @param offsetInWindow 可选参数，可以为null。为输出参数，获取预处理操作使当前view的位置偏移(offsetInWindow[0]和offsetInWindow[1]分别为x轴和y轴偏移)
+     * @param type 滑动事件的类型
+     * @param consumed 回填参数，数组大小为2，下标为0的值为x轴其原始值加上视图层次结构中所有嵌套滚动父级所消费的滚动距离，下表为1的值为Y轴
+     */
+    void dispatchNestedScroll(int dxConsumed, int dyConsumed, int dxUnconsumed, int dyUnconsumed,
+            @Nullable int[] offsetInWindow, @ViewCompat.NestedScrollType int type,
+            @NonNull int[] consumed);
+```
+
+### NestedScrollingParent
+
+```java
+public interface NestedScrollingParent {
+    /**
+     * 对子视图开始嵌套滑动请求的回应
+     *
+     * @param child 包含发起嵌套滑动请求的子视图的直接子视图
+     * @param target 发起嵌套滑动请求的子视图
+     * @param axes 滑动方向标记
+     * @return true 当前父视图是否响应
+     */
+    boolean onStartNestedScroll(@NonNull View child, @NonNull View target, @ScrollAxis int axes);
+
+    /**
+     * 对开始滑动响应的回调
+     *
+     * @param child 包含发起嵌套滑动请求的子视图的直接子视图
+     * @param target 发起嵌套滑动请求的子视图
+     * @param axes 滑动方向标记
+     */
+    void onNestedScrollAccepted(@NonNull View child, @NonNull View target, @ScrollAxis int axes);
+
+    /**
+     * 停止滑动的回调
+     *
+     * @param target 发起嵌套滑动请求的子视图
+     */
+    void onStopNestedScroll(@NonNull View target);
+
+    /**
+     * 处理NestedScrollingChild未消耗完的滑动距离
+     *
+     * @param target 发起嵌套滑动请求的子视图
+     * @param dxConsumed 已消耗的x轴滑动距离
+     * @param dyConsumed 已消耗的y轴滑动距离
+     * @param dxUnconsumed 未消耗的x轴滑动距离
+     * @param dyUnconsumed 未消耗的y轴滑动距离
+     */
+    void onNestedScroll(@NonNull View target, int dxConsumed, int dyConsumed,
+            int dxUnconsumed, int dyUnconsumed);
+
+    /**
+     * 在NestedScrollingChild处理滑动之前，预处理此滑动
+     *
+     * @param target 发起嵌套滑动请求的子视图
+     * @param dx x轴滑动距离
+     * @param dy y轴滑动距离
+     * @param consumed 回填参数，数组大小为2，填入此次消费的滑动距离，默认值为0
+     */
+    void onNestedPreScroll(@NonNull View target, int dx, int dy, @NonNull int[] consumed);
+
+    /**
+     * 处理fling事件
+     * @param target 发起嵌套滑动请求的子视图
+     * @param velocityX x轴fling速度
+     * @param velocityY y轴fling速度
+     * @param consumed NestedScrollingChild是否已处理此fling
+     * @return 是否处理此fling
+     */
+    boolean onNestedFling(@NonNull View target, float velocityX, float velocityY, boolean consumed);
+
+    /**
+     * * 在NestedScrollingChild之前预处理fling事件
+     * @param target 发起嵌套滑动请求的子视图
+     * @param velocityX x轴fling速度
+     * @param velocityY y轴fling速度
+     * @return 是否处理此fling
+     */
+    boolean onNestedPreFling(@NonNull View target, float velocityX, float velocityY);
+
+    /**
+     * 获取滑动方向
+     * @return 滑动方向
+     */
+    @ScrollAxis
+    int getNestedScrollAxes();
+}
+
+```
+
+`NestedScrollingParent2`继承了`NestedScrollingParent` ，并且为`NestedScrollingParent`中的方法添加了`type`参数，这个和`NestedScrollingChild2`相似；
+
+`NestedScrollingParent3`继承了`NestedScrollingParent2`，并且添加了一个新的方法：
+
+```java
+/**
+ * 在子视图消费过滑动事件后，父视图再次消费
+ * @param target 发起嵌套滚动的子视图
+ * @param dxConsumed 水平方向上子视图已消费的距离
+ * @param dyConsumed 垂直方向上子视图已消费的距离
+ * @param dxUnconsumed 水平方向上子视图未消费的距离
+ * @param dxUnconsumed 垂直方向上子视图未消费的距离
+ * @param type 滚动输入类型
+ * @param consumed 回填参数，父视图所消费的距离
+ */
+
+void onNestedScroll(@NonNull View target, int dxConsumed, int dyConsumed, int dxUnconsumed,
+            int dyUnconsumed, @ViewCompat.NestedScrollType int type, @NonNull int[] consumed);
+```
 
 
+
+### 具体分发过程
+
+```java
+    @Override
+    public boolean onTouchEvent(MotionEvent e) {
+        if (mLayoutSuppressed || mIgnoreMotionEventTillDown) {
+            return false;
+        }
+        
+        // 先分发给OnItemTouchListener，如果分发成功，则不再分发
+        if (dispatchToOnItemTouchListeners(e)) {
+            cancelScroll();
+            return true;
+        }
+
+        // 如果没有设置LayoutManager，不会分发事件
+        if (mLayout == null) {
+            return false;
+        }
+
+        final boolean canScrollHorizontally = mLayout.canScrollHorizontally();
+        final boolean canScrollVertically = mLayout.canScrollVertically();
+
+        if (mVelocityTracker == null) {
+            mVelocityTracker = VelocityTracker.obtain();
+        }
+        boolean eventAddedToVelocityTracker = false;
+
+        final int action = e.getActionMasked();
+        final int actionIndex = e.getActionIndex();
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            mNestedOffsets[0] = mNestedOffsets[1] = 0;
+        }
+        final MotionEvent vtev = MotionEvent.obtain(e);
+        vtev.offsetLocation(mNestedOffsets[0], mNestedOffsets[1]);
+
+        switch (action) {
+            case MotionEvent.ACTION_DOWN: {
+                // 初始化点击位置
+                mScrollPointerId = e.getPointerId(0);
+                mInitialTouchX = mLastTouchX = (int) (e.getX() + 0.5f);
+                mInitialTouchY = mLastTouchY = (int) (e.getY() + 0.5f);
+
+                int nestedScrollAxis = ViewCompat.SCROLL_AXIS_NONE;
+                if (canScrollHorizontally) {
+                    nestedScrollAxis |= ViewCompat.SCROLL_AXIS_HORIZONTAL;
+                }
+                if (canScrollVertically) {
+                    nestedScrollAxis |= ViewCompat.SCROLL_AXIS_VERTICAL;
+                }
+                // 请求开始嵌套滑动
+                startNestedScroll(nestedScrollAxis, TYPE_TOUCH);
+            } break;
+
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                mScrollPointerId = e.getPointerId(actionIndex);
+                mInitialTouchX = mLastTouchX = (int) (e.getX(actionIndex) + 0.5f);
+                mInitialTouchY = mLastTouchY = (int) (e.getY(actionIndex) + 0.5f);
+            } break;
+
+            case MotionEvent.ACTION_MOVE: {
+                final int index = e.findPointerIndex(mScrollPointerId);
+                if (index < 0) {
+                    Log.e(TAG, "Error processing scroll; pointer index for id "
+                            + mScrollPointerId + " not found. Did any MotionEvents get skipped?");
+                    return false;
+                }
+				
+                // 获得滑动距离
+                final int x = (int) (e.getX(index) + 0.5f);
+                final int y = (int) (e.getY(index) + 0.5f);
+                int dx = mLastTouchX - x;
+                int dy = mLastTouchY - y;
+                // 如果不处于滑动状态
+                // 一共由三种状态：
+                // SCROLL_STATE_IDLE：普通状态，没有任何滑动事件
+                // SCROLL_STATE_DRAGGING：滑动状态
+                // SCROLL_STATE_SETTLING：手指离开屏幕后的，减速滚动状态
+                if (mScrollState != SCROLL_STATE_DRAGGING) {
+                    boolean startScroll = false;
+                    if (canScrollHorizontally) {
+                        if (dx > 0) {
+                            dx = Math.max(0, dx - mTouchSlop);
+                        } else {
+                            dx = Math.min(0, dx + mTouchSlop);
+                        }
+                        if (dx != 0) {
+                            startScroll = true;
+                        }
+                    }
+                    if (canScrollVertically) {
+                        if (dy > 0) {
+                            dy = Math.max(0, dy - mTouchSlop);
+                        } else {
+                            dy = Math.min(0, dy + mTouchSlop);
+                        }
+                        if (dy != 0) {
+                            startScroll = true;
+                        }
+                    }
+                    if (startScroll) {
+                        setScrollState(SCROLL_STATE_DRAGGING);
+                    }
+                }
+
+                if (mScrollState == SCROLL_STATE_DRAGGING) {
+                    mReusableIntPair[0] = 0;
+                    mReusableIntPair[1] = 0;
+                    // 询问父视图是否消费事件，如果消费则对滑动距离进行更新
+                    if (dispatchNestedPreScroll(
+                            canScrollHorizontally ? dx : 0,
+                            canScrollVertically ? dy : 0,
+                            mReusableIntPair, mScrollOffset, TYPE_TOUCH
+                    )) {
+                        dx -= mReusableIntPair[0];
+                        dy -= mReusableIntPair[1];
+                        // Updated the nested offsets
+                        mNestedOffsets[0] += mScrollOffset[0];
+                        mNestedOffsets[1] += mScrollOffset[1];
+                        // 滑动开始，父视图不要再拦截事件
+                        getParent().requestDisallowInterceptTouchEvent(true);
+                    }
+
+                    mLastTouchX = x - mScrollOffset[0];
+                    mLastTouchY = y - mScrollOffset[1];
+					
+                    // 子视图真正开始消费滑动事件(LayoutManager::scrollVerticallyBy)，
+                    // 并且消费完之后, 再让父视图消费
+                    if (scrollByInternal(
+                            canScrollHorizontally ? dx : 0,
+                            canScrollVertically ? dy : 0,
+                            e)) {
+                        getParent().requestDisallowInterceptTouchEvent(true);
+                    }
+                    // 预取下一个ViewHolder
+                    if (mGapWorker != null && (dx != 0 || dy != 0)) {
+                        mGapWorker.postFromTraversal(this, dx, dy);
+                    }
+                }
+            } break;
+
+            case MotionEvent.ACTION_POINTER_UP: {
+                onPointerUp(e);
+            } break;
+
+            case MotionEvent.ACTION_UP: {
+                mVelocityTracker.addMovement(vtev);
+                eventAddedToVelocityTracker = true;
+                mVelocityTracker.computeCurrentVelocity(1000, mMaxFlingVelocity);
+                final float xvel = canScrollHorizontally
+                        ? -mVelocityTracker.getXVelocity(mScrollPointerId) : 0;
+                final float yvel = canScrollVertically
+                        ? -mVelocityTracker.getYVelocity(mScrollPointerId) : 0;
+                // 处理快速滑动
+                if (!((xvel != 0 || yvel != 0) && fling((int) xvel, (int) yvel))) {
+                    // 重置状态
+                    setScrollState(SCROLL_STATE_IDLE);
+                }
+                resetScroll();
+            } break;
+			
+            case MotionEvent.ACTION_CANCEL: {
+                // 取消滑动
+                cancelScroll();
+            } break;
+        }
+
+        if (!eventAddedToVelocityTracker) {
+            mVelocityTracker.addMovement(vtev);
+        }
+        vtev.recycle();
+
+        return true;
+    }
+```
+
+1. `ACTION_DOWN`：
+   1. Child.startNestedScroll
+   2. Parent.onStartNestedScroll
+   3. Parent.onNestedScrollAccepted
+2. `ACTION_MOVE`:
+   1. Child.dispatchNestedPreScroll
+   2. Parent.onNestedPreScroll
+   3. Child.scrollStep
+   4. Child.dispatchNestedScroll
+   5. Parent.onNestedScroll
+3. `ACTION_UP`:
+   1. Child.dispatchNestedPreFling
+   2. Parent.onNestedPreFling
+   3. Parent.onNestedFling
+   4. Child.startNestedScroll
+   5. Child.fling
 
 ## Adapter详解
 
+`Adapter`主要是提供`ViewHolder`，`ViewHolder`是`RecyclerView`的缓存对象；
+
+### ViewHolder详解
+
+`ViewHolder`是一种包含了子项视图和相关描述消息的数据结构，主要字段如下：
+
+```java
+		// 子项视图，从构造函数传入
+		@NonNull
+        public final View itemView;
+        // 对RecyclerView的弱引用
+        WeakReference<RecyclerView> mNestedRecyclerView;
+        // 当前ViewHolder在视图中的位置
+        int mPosition = NO_POSITION;
+        int mOldPosition = NO_POSITION;
+        long mItemId = NO_ID;
+		// 当前ViewHolder的类型，RecyclerView可以显示多个类型的ViewHolder
+        int mItemViewType = INVALID_TYPE;
+        int mPreLayoutPosition = NO_POSITION;
+```
+
+`Adapter`是一个抽象类，主要的抽象方法如下：
+
+```java
+/**
+ * 根据viewType，创建一个ViewHolder
+ * @param parent 父视图
+ * @param viewType 视图类型
+ * @return Viewholder
+ */
+public abstract VH onCreateViewHolder(@NonNull ViewGroup parent, int viewType);
+ 
+/**
+ * 根据所给出的位置，对ViewHolder进行更新
+ * @param holder 需要更新的ViewHolder
+ * @param position 这个ViewHolder所处位置
+ */
+public abstract void onBindViewHolder(@NonNull VH holder, int position);
+
+/**
+ * 获取逻辑上条目的数目
+ * @return 条目数目
+ *
+public abstract int getItemCount();
+```
+
+还有一些其他方法值得注意：
+
+```java
+/**
+ * 根据位置返回视图类型
+ * 默认是没有实现的，如果你想要显示多种类型的视图，需要重载这个函数
+ * @return 视图类型
+ */
+public int getItemViewType(int position) {
+    return 0;
+ }
+```
+
+```java
+/**
+ * 通知数据的改变，同样还有其他的notify方法
+ * 这是一个观察者模式，最终都交给了RecyclerView的私有类RecyclerViewDataObserver处理
+ */
+public final void notifyDataSetChanged() {
+            mObservable.notifyChanged();
+}
+```
+
+
+
 ## 缓存机制
+
+在开始讲解缓存机制之前，需要思考一些问题：
+
+1. 有几类缓存
+2. 各种缓存具体意义
+3. 各种缓存的增删查改的时机
+
+
 
 ## 其他问题
 
