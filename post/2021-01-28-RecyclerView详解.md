@@ -624,17 +624,48 @@ void onNestedScroll(@NonNull View target, int dxConsumed, int dyConsumed, int dx
 
 ```java
 		// 子项视图，从构造函数传入
-		@NonNull
         public final View itemView;
-        // 对RecyclerView的弱引用
+        // 对ViewHolder内部的RecyclerView的弱引用
         WeakReference<RecyclerView> mNestedRecyclerView;
         // 当前ViewHolder在视图中的位置
         int mPosition = NO_POSITION;
+		// 当前ViewHolder在之前视图中的位置
         int mOldPosition = NO_POSITION;
+		// 当前ViewHolder的唯一标识符，默认为NO_ID;
+		// 当 Adapter.hasStableIds() == true 时，应当重写Adapter.getItemId()
         long mItemId = NO_ID;
 		// 当前ViewHolder的类型，RecyclerView可以显示多个类型的ViewHolder
         int mItemViewType = INVALID_TYPE;
+		// 在预布局中的位置
         int mPreLayoutPosition = NO_POSITION;
+
+		// 和动画有关的两个ViewHolder
+        ViewHolder mShadowedHolder = null;
+        ViewHolder mShadowingHolder = null;
+		// 保留当前ViewHolder的一些信息
+		int mFlags;
+
+		// 不知道具体用处，但是看源码是在Viewholder的添加移除更新移动过程中使用
+		private static final List<Object> FULLUPDATE_PAYLOADS = Collections.emptyList();
+        List<Object> mPayloads = null;
+        List<Object> mUnmodifiedPayloads = null;
+
+		// 标记当前ViewHolder是否可被回收，
+		// 事实上应该用布尔量，这里用int应该是是为了防止在反复调用过程中出错
+        private int mIsRecyclableCount = 0;
+
+        // 缓存容器
+        Recycler mScrapContainer = null;
+        // 标记当前ViewHolder应该保留在哪种缓存中
+        boolean mInChangeScrap = false;
+
+        // 这两个是关于无障碍使用的，和整体代码分析无太大关系
+        private int mWasImportantForAccessibilityBeforeHidden =
+                ViewCompat.IMPORTANT_FOR_ACCESSIBILITY_AUTO;
+        int mPendingAccessibilityState = PENDING_ACCESSIBILITY_STATE_NOT_SET;
+
+        // 绑定的RecyclerView
+        RecyclerView mOwnerRecyclerView;
 ```
 
 `Adapter`是一个抽象类，主要的抽象方法如下：
@@ -694,6 +725,87 @@ public final void notifyDataSetChanged() {
 1. 有几类缓存
 2. 各种缓存具体意义
 3. 各种缓存的增删查改的时机
+
+各种缓存的分类标准是`ViewHolder`的状态，`ViewHolder`使用`int mFlags`保存了诸多状态；
+
+```java
+// 已被绑定到正确的位置
+static final int FLAG_BOUND = 1 << 0;
+
+// 所绑定的数据过时了，需要重新绑定
+static final int FLAG_UPDATE = 1 << 1;
+
+// 所保留的位置信息和Id信息已完全不可信任，需要再进行完整的重新绑定
+static final int FLAG_INVALID = 1 << 2;
+
+// 标志当前ViewHolder已被移除，但是它的视图还有可能存在，用来显示动画
+static final int FLAG_REMOVED = 1 << 3;
+
+// 标记当前ViewHolder暂时不可回收，一般是为了显示动画
+static final int FLAG_NOT_RECYCLABLE = 1 << 4;
+
+/**
+ * This ViewHolder is returned from scrap which means we are expecting an addView call
+ * for this itemView. When returned from scrap, ViewHolder stays in the scrap list until
+ * the end of the layout pass and then recycled by RecyclerView if it is not added back to
+ * the RecyclerView.
+ */
+static final int FLAG_RETURNED_FROM_SCRAP = 1 << 5;
+
+/**
+ * This ViewHolder is fully managed by the LayoutManager. We do not scrap, recycle or remove
+ * it unless LayoutManager is replaced.
+ * It is still fully visible to the LayoutManager.
+ */
+static final int FLAG_IGNORE = 1 << 7;
+
+/**
+ * When the View is detached form the parent, we set this flag so that we can take correct
+ * action when we need to remove it or add it back.
+ */
+static final int FLAG_TMP_DETACHED = 1 << 8;
+
+/**
+ * Set when we can no longer determine the adapter position of this ViewHolder until it is
+ * rebound to a new position. It is different than FLAG_INVALID because FLAG_INVALID is
+ * set even when the type does not match. Also, FLAG_ADAPTER_POSITION_UNKNOWN is set as soon
+ * as adapter notification arrives vs FLAG_INVALID is set lazily before layout is
+ * re-calculated.
+ */
+static final int FLAG_ADAPTER_POSITION_UNKNOWN = 1 << 9;
+
+/**
+ * Set when a addChangePayload(null) is called
+ */
+static final int FLAG_ADAPTER_FULLUPDATE = 1 << 10;
+
+/**
+ * Used by ItemAnimator when a ViewHolder's position changes
+ */
+static final int FLAG_MOVED = 1 << 11;
+
+/**
+ * Used by ItemAnimator when a ViewHolder appears in pre-layout
+ */
+static final int FLAG_APPEARED_IN_PRE_LAYOUT = 1 << 12;
+
+static final int PENDING_ACCESSIBILITY_STATE_NOT_SET = -1;
+
+/**
+ * Used when a ViewHolder starts the layout pass as a hidden ViewHolder but is re-used from
+ * hidden list (as if it was scrap) without being recycled in between.
+ *
+ * When a ViewHolder is hidden, there are 2 paths it can be re-used:
+ *   a) Animation ends, view is recycled and used from the recycle pool.
+ *   b) LayoutManager asks for the View for that position while the ViewHolder is hidden.
+ *
+ * This flag is used to represent "case b" where the ViewHolder is reused without being
+ * recycled (thus "bounced" from the hidden list). This state requires special handling
+ * because the ViewHolder must be added to pre layout maps for animations as if it was
+ * already there.
+ */
+static final int FLAG_BOUNCED_FROM_HIDDEN_LIST = 1 << 13;
+```
 
 
 
