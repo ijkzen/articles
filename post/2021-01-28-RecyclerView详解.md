@@ -745,66 +745,156 @@ static final int FLAG_REMOVED = 1 << 3;
 static final int FLAG_NOT_RECYCLABLE = 1 << 4;
 
 /**
- * This ViewHolder is returned from scrap which means we are expecting an addView call
- * for this itemView. When returned from scrap, ViewHolder stays in the scrap list until
- * the end of the layout pass and then recycled by RecyclerView if it is not added back to
- * the RecyclerView.
+ * 标记当前ViewHolder来自scrap缓存，这个缓存里的ViewHolder有可能再次添加到RecyclerView；
  */
 static final int FLAG_RETURNED_FROM_SCRAP = 1 << 5;
 
 /**
- * This ViewHolder is fully managed by the LayoutManager. We do not scrap, recycle or remove
- * it unless LayoutManager is replaced.
- * It is still fully visible to the LayoutManager.
+ * 完全被LayoutManager管理，不会被Recycler管理；
  */
 static final int FLAG_IGNORE = 1 << 7;
 
 /**
- * When the View is detached form the parent, we set this flag so that we can take correct
- * action when we need to remove it or add it back.
+ * 标记当前ViewHolder和RecyclerView短暂分离，以便后面进行添加或者删除；
  */
 static final int FLAG_TMP_DETACHED = 1 << 8;
 
 /**
- * Set when we can no longer determine the adapter position of this ViewHolder until it is
- * rebound to a new position. It is different than FLAG_INVALID because FLAG_INVALID is
- * set even when the type does not match. Also, FLAG_ADAPTER_POSITION_UNKNOWN is set as soon
- * as adapter notification arrives vs FLAG_INVALID is set lazily before layout is
- * re-calculated.
+ * 当我们不再确定此ViewHolder的位置时，设置此标志；
+ * 与 FLAG_INVALID 有两点不同：
+ * 		1. FLAG_INVALID 包括ViewHolder类型不匹配
+ * 		2. FLAG_ADAPTER_POSITION_UNKNOWN 是Adapter通知就立即设置，
+ *  	   而 FLAG_INVALID 则会延迟到重新计算layout之前；
  */
 static final int FLAG_ADAPTER_POSITION_UNKNOWN = 1 << 9;
 
 /**
- * Set when a addChangePayload(null) is called
+ * 当调用 addChangePayload 函数时设置
  */
 static final int FLAG_ADAPTER_FULLUPDATE = 1 << 10;
 
 /**
- * Used by ItemAnimator when a ViewHolder's position changes
+ * 当 ViewHolder 位置发生变化时，被 ItemAnimator 使用；
  */
 static final int FLAG_MOVED = 1 << 11;
 
 /**
- * Used by ItemAnimator when a ViewHolder appears in pre-layout
+ * 在预布局期间，被 ItemAnimator 使用；
  */
 static final int FLAG_APPEARED_IN_PRE_LAYOUT = 1 << 12;
 
 static final int PENDING_ACCESSIBILITY_STATE_NOT_SET = -1;
 
 /**
- * Used when a ViewHolder starts the layout pass as a hidden ViewHolder but is re-used from
- * hidden list (as if it was scrap) without being recycled in between.
- *
- * When a ViewHolder is hidden, there are 2 paths it can be re-used:
- *   a) Animation ends, view is recycled and used from the recycle pool.
- *   b) LayoutManager asks for the View for that position while the ViewHolder is hidden.
- *
- * This flag is used to represent "case b" where the ViewHolder is reused without being
- * recycled (thus "bounced" from the hidden list). This state requires special handling
- * because the ViewHolder must be added to pre layout maps for animations as if it was
- * already there.
+ * 标记当前ViewHolder是从hidden_list里绑定的
+ * 当一个ViewHolder被标记为hidden，有两种方式复用它；
+ * 1. 动画结束时，ViewHolder会被回收
+ * 2. LayoutManager需要一个此位置上的ViewHolder，尽管它是hidden的
+ * 这个标记属于第二种；
  */
 static final int FLAG_BOUNCED_FROM_HIDDEN_LIST = 1 << 13;
+```
+
+缓存由`Recycler`处理，具体有以下缓存：
+
+```java
+// 当前RecyclerView显示ViewHolder
+final ArrayList<ViewHolder> mAttachedScrap = new ArrayList<>();
+// 数据已经改变的ViewHolder，和notify方法相关
+ArrayList<ViewHolder> mChangedScrap = null;
+
+// 已经和RecyclerView分离的ViewHolder，默认容量为2
+final ArrayList<ViewHolder> mCachedViews = new ArrayList<ViewHolder>();
+
+// 一个只读副本，供外部使用
+private final List<ViewHolder>
+mUnmodifiableAttachedScrap = Collections.unmodifiableList(mAttachedScrap);
+
+// 开发者自定义缓存，默认为null
+private ViewCacheExtension mViewCacheExtension;
+
+// 缓存池，
+// mCachedViews 无法保存屏幕上所有移除的 ViewHolder 时，剩余的 ViewHolder 根据 type 分类放入缓存池中
+RecycledViewPool mRecyclerPool;
+```
+
+根据位置获取`ViewHolder`的过程，在`tryGetViewHolderForPositionByDeadline`函数中，但是代码太长了，就不贴了，流程图如下：
+
+```mermaid
+graph TD;
+a("from changedScrap by position") --> b("from scrap, hidden, cache by position");
+b --> c("from scrap cache by id")
+c --> d("from ViewCacheExtension by position and type")
+d --> e("from recycler pool by type")
+e --> f("from adapter by create")
+f --> g("rebound it if necessary")
+```
+
+### 初次刷新
+
+在调用`LayoutManager::onLayoutChildren`之前，这些缓存要么是空的要么就是`null`；
+
+以`LinearLayoutManager`为例，调用过程如下：
+
+```mermaid
+graph TD;
+a(onLayoutChildren) --> b("detachAndScrapAttachedViews")
+b-->c(fill)
+c-->d("layoutChunk")
+d-->e("Recycler::tryGetViewHolderForPositionByDeadline")
+```
+
+`detachAndScrapAttachedViews`：短暂移除和回收所有子视图到`Recycler`；
+
+`layoutChunk`：不断从`Recycler`中获取ViewHolder进行布局；
+
+初次调用`detachAndScrapAttachedViews`，由于当前`RecyclerView`并无子视图，所以什么都没做；
+
+初次调用`layoutChunk`，各种缓存都是空的，所以都是通过`Adapter::createViewHolder` 获得ViewHolder；
+
+第一次刷新完成后，各种缓存中仍然是空的，但是完成了`RecycledViewPool`的初始化；
+
+### 主动调用invaliate()
+
+在初次刷新完成后，主动调用`invalidate`函数；
+
+调用`detachAndScrapAttachedViews`，所有的子视图回收到`Recycler`的`AttachScrap`或者`ChangedScrap`；
+
+调用`layoutChunk`，可以从缓存中获取`ViewHolder`，不必再调用`Adapter::createViewHolder`；
+
+### 滚动刷新
+
+这个动作分为两个部分，新的`ViewHolder`添加到屏幕，旧的`ViewHolder`移出屏幕；
+
+滚动操作的调用路径如下，此处仍然以`LinearLayoutManager`为例
+
+```mermaid
+graph TD;
+a("scrollByInternal")--> b("scrollStep")
+b-->c("LayoutManager::scrollVerticallyBy")
+c-->d("LayoutManager::scrollBy")
+d-->e("OrientationHelper::offsetChildren")
+e-->f("offsetChildrenVertical")
+f-->g("View::set()")
+g-->h("ViewParent::invalidateChild")
+```
+
+上述流程的最后两步，先是修改了每个子视图的`top`和`bottom`，然后再重新渲染子视图；
+
+走完上述流程后，还会进行一个预取操作，详情请看`GapWorker.java`，关键函数是`prefetchPositionWithDeadline`；
+
+仍然缺少一个部分，就是对移出屏幕的`ViewHolder`的处理；
+
+实际上在`fill`函数中就已处理这一问题，调用过程如下：
+
+```mermaid
+graph TD;
+a("fill") --> b("recycleByLayoutState")
+b --> c("recycleViewsFromStart")
+c --> d("recycleChildren")
+d --> e("removeAndRecycleViewAt")
+e --> f("Recycler::recyclerView")
+f --> g("recycleViewHolderInternal")
 ```
 
 
@@ -813,15 +903,45 @@ static final int FLAG_BOUNCED_FROM_HIDDEN_LIST = 1 << 13;
 
 ### ItemDecoration
 
-### ItemAnimator
+`ItemDecoration`是一个抽象类，一个`ViewHolder`可以有多层装饰，在`RecyclerView`中用`mItemDecorations`变量存储这些装饰；
 
-### 滑动删除和长按拖拽
+在绘制完所有子视图后，开始绘制所有装饰；
 
-### 添加Header和Footer
+在`DividerItemDecoration.java`中详细讲解了其绘制过程：
 
-### 下拉刷新和上滑刷新
+```java
+private void drawVertical(Canvas canvas, RecyclerView parent)
+{
+    canvas.save();
+    final int left;
+    final int right;
+    //noinspection AndroidLintNewApi - NewApi lint fails to handle overrides.
+    if (parent.getClipToPadding())
+    {
+        left = parent.getPaddingLeft();
+        right = parent.getWidth() - parent.getPaddingRight();
+        canvas.clipRect(left, parent.getPaddingTop(), right,
+                        parent.getHeight() - parent.getPaddingBottom());
+    }
+    else
+    {
+        left = 0;
+        right = parent.getWidth();
+    }
 
-## 各种优化
+    final int childCount = parent.getChildCount();
+    for (int i = 0; i < childCount; i++)
+    {
+        final View child = parent.getChildAt(i);
+        parent.getDecoratedBoundsWithMargins(child, mBounds);
+        final int bottom = mBounds.bottom + Math.round(child.getTranslationY());
+        final int top = bottom - mDivider.getIntrinsicHeight();
+        mDivider.setBounds(left, top, right, bottom);
+        mDivider.draw(canvas);
+    }
+    canvas.restore();
+}
+```
 
-## Viewpager2的实现
+找到每个子视图的下边界，然后开始绘制`Drawable`。
 
