@@ -23,7 +23,7 @@ categories: Android原理
 
 ### View-based UI 工作过程
 
-原有的`View-based` UI 将上述 5 个属性封装到一个类中，
+原有的`View-based` UI 将上述 5 个属性封装到一个`类`中，
 
 1. 画布大小，`onMeasure`负责；
 2. 画布位置，`onLayout`负责；
@@ -35,5 +35,39 @@ categories: Android原理
 
 然后通过 `findViewById` 获取对应视图的实例，然后通过这个实例调用其成员函数更新其状态，这里是命令式的。
 
+可以看到我们先是声明了 `UI`，然后使用命令去更新 `UI`；为什么会有两种范式呢？这是因为我们使用了面向对象的程序设计；
 
+### Jetpack Compose 工作过程
+
+`Jetpack Compose`将上述 5 个属性封装到一个`函数`中；
+
+```kotlin
+@Composable
+fun Icon(
+    painter: Painter,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current.copy(alpha = LocalContentAlpha.current)
+) {
+    // TODO: b/149735981 semantics for content description
+    val colorFilter = if (tint == Color.Unspecified) null else ColorFilter.tint(tint)
+    val semantics = if (contentDescription != null) {
+        Modifier.semantics {
+            this.contentDescription = contentDescription
+            this.role = Role.Image
+        }
+    } else {
+        Modifier
+    }
+    Box(
+        modifier.toolingGraphicsLayer().defaultSizeFor(painter)
+            .paint(
+                painter,
+                colorFilter = colorFilter,
+                contentScale = ContentScale.Fit
+            )
+            .then(semantics)
+    )
+}
+```
 
