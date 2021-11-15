@@ -1,5 +1,6 @@
 ---
 title: Kotlin Coroutine 原理详解（2）-- 协程间的互动
+categories: Kotlin
 ---
 
 ## 基础类分析
