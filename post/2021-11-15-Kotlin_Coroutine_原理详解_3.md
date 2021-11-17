@@ -41,8 +41,9 @@ suspend fun bbb() {
 // launch 扩展函数被编译为静态函数；
 // 被扩展的 `CoroutineScope` 作为第一个参数；
 // 第二三参数分别是 `CoroutineContext` `CoroutineStart`类型；
-// 第四个参数为 `Function2` 一个有两个参数一个返回值的函数类型，新增了两个方法；其中 `invokeSuspend` 
-// 函数编写了状态机的部分；`create` 函数创建了最初的 `Continuation`；实现 `invoke` 
+// 第四个参数类型为 `Function2` 一个有两个参数一个返回值的函数类型，新增了两个方法；其中 `invokeSuspend` 
+// 函数编写了状态机的部分；`create` 函数创建了最初的 `Continuation`；实现 `invoke` 启动状态机
+// 第五六两个参数不知道有什么用。
 BuildersKt.launch$default((CoroutineScope)GlobalScope.INSTANCE, (CoroutineContext)null, (CoroutineStart)null, (Function2)(new Function2((Continuation)null) {
          int label;
 
@@ -55,6 +56,7 @@ BuildersKt.launch$default((CoroutineScope)GlobalScope.INSTANCE, (CoroutineContex
                ResultKt.throwOnFailure($result);
                var10000 = MainActivity.this;
                this.label = 1;
+			   // 这里可以看出此处匿名实现的`Function2`不仅仅实现了`Function2`，还实现了`Continuation`接口，这一点并没有在反编译代码中表现；
                if (var10000.aaa(this) == var2) {
                   return var2;
                }
@@ -77,10 +79,13 @@ BuildersKt.launch$default((CoroutineScope)GlobalScope.INSTANCE, (CoroutineContex
                return Unit.INSTANCE;
             }
          }
-
+		
+		// 传入了`value` 参数，但是并没有用到；
+		// 传入了`completion`作为上层状态机；
          @NotNull
          public final Continuation create(@Nullable Object value, @NotNull Continuation completion) {
             Intrinsics.checkNotNullParameter(completion, "completion");
+			// 此处的 `var3` 同样实现了 `Continuation` 接口；
             Function2 var3 = new <anonymous constructor>(completion);
             return var3;
          }
@@ -99,8 +104,10 @@ BuildersKt.launch$default((CoroutineScope)GlobalScope.INSTANCE, (CoroutineContex
    public final Object aaa(@NotNull Continuation var1) {
       Object $continuation;
       label27: {
+	  // 此处 `undefinedtype` 指的是下方所匿名实现的 `ContinuationImpl` 类型；
          if (var1 instanceof <undefinedtype>) {
             $continuation = (<undefinedtype>)var1;
+			// 下面的操作是为了保证 `label` 的正确性
             if ((((<undefinedtype>)$continuation).label & Integer.MIN_VALUE) != 0) {
                ((<undefinedtype>)$continuation).label -= Integer.MIN_VALUE;
                break label27;
@@ -207,4 +214,8 @@ BuildersKt.launch$default((CoroutineScope)GlobalScope.INSTANCE, (CoroutineContex
       return Unit.INSTANCE;
    }
 ```
+上面的代码基本说明了协程通过状态机运行的，但是仍然有两点问题：
+1. 状态机是如何开始如何结束的？
+2. 大状态机如何切换到小状态机，小状态机如何切回大状态机？
+
 
