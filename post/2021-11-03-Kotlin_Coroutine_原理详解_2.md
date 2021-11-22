@@ -161,7 +161,7 @@ public interface Job : CoroutineContext.Element {
     // 与子协程建立关系，返回 ChildHanlde 以取消与父协程的关系
     public fun attachChild(child: ChildJob): ChildHandle
     // 阻塞当前父协程，直到当前子协程执行完
-    public suspend fun join()、
+    public suspend fun join()
     // 注册当前协程执行完成的回调；如果已经执行完则立即回调，如果没有执行完则等待状态变更后回调；
     public fun invokeOnCompletion(handler: CompletionHandler): DisposableHandle
 }
@@ -191,9 +191,247 @@ public interface ParentJob : Job {
     public fun getChildJobCancellationCause(): CancellationException
 }
 ```
+### DisposableHandle
+一个用于释放资源的接口
+```kotlin
+public interface DisposableHandle {
+    
+    public fun dispose()
+}
+```
 
-### JobSupport
+### ChildHandle
+子协程通知父协程异常原因的接口
+```kotlin
+public interface ChildHandle : DisposableHandle {
 
+    // 父协程的引用
+    public val parent: Job?
+
+    // 子协程调用这个方法向父协程通知异常
+    // 这个方法会被子协程调用两次，第一次子协程为尽快取消父协程和其他兄弟协程，报告根本原因；
+    // 第二次子协程确定原因后，再次调用。
+    public fun childCancelled(cause: Throwable): Boolean
+}
+```
+
+### JobSupport实现
+所有的协程都会具有`Job`、`ParentJob`、`ChildJob`的特性，但是又不可能每个协程类都去单独实现，因此就使用 `JobSupport` 这个类来集中实现上述特性；
+而`JobSupport`的实现几乎完全依赖着协程当前状态；
+`JobSupport`有以下十种状态：
+```
+       === Internal states ===
+
+       name       state class              public state  description
+       ------     ------------             ------------  -----------
+       EMPTY_N    EmptyNew               : New           no listeners
+       EMPTY_A    EmptyActive            : Active        no listeners
+       SINGLE     JobNode                : Active        a single listener
+       SINGLE+    JobNode                : Active        a single listener + NodeList added as its next
+       LIST_N     InactiveNodeList       : New           a list of listeners (promoted once, does not got back to EmptyNew)
+       LIST_A     NodeList               : Active        a list of listeners (promoted once, does not got back to JobNode/EmptyActive)
+       COMPLETING Finishing              : Completing    has a list of listeners (promoted once from LIST_*)
+       CANCELLING Finishing              : Cancelling    -- " --
+       FINAL_C    Cancelled              : Cancelled     Cancelled (final state)
+       FINAL_R    <any>                  : Completed     produced some result
+
+
+        === Transitions ===
+
+           New states      Active states       Inactive states
+
+          +---------+       +---------+                          }
+          | EMPTY_N | ----> | EMPTY_A | ----+                    } Empty states
+          +---------+       +---------+     |                    }
+               |  |           |     ^       |    +----------+
+               |  |           |     |       +--> |  FINAL_* |
+               |  |           V     |       |    +----------+
+               |  |         +---------+     |                    }
+               |  |         | SINGLE  | ----+                    } JobNode states
+               |  |         +---------+     |                    }
+               |  |              |          |                    }
+               |  |              V          |                    }
+               |  |         +---------+     |                    }
+               |  +-------> | SINGLE+ | ----+                    }
+               |            +---------+     |                    }
+               |                 |          |
+               V                 V          |
+          +---------+       +---------+     |                    }
+          | LIST_N  | ----> | LIST_A  | ----+                    } [Inactive]NodeList states
+          +---------+       +---------+     |                    }
+             |   |             |   |        |
+             |   |    +--------+   |        |
+             |   |    |            V        |
+             |   |    |    +------------+   |   +------------+   }
+             |   +-------> | COMPLETING | --+-- | CANCELLING |   } Finishing states
+             |        |    +------------+       +------------+   }
+             |        |         |                    ^
+             |        |         |                    |
+             +--------+---------+--------------------+
+```
+#### Empty_New 和 Empty_Active
+`Empty_New` 和 `Empty_Active` 都是 `JobSupport` 的最初状态，根据构造函数的传参不同来赋予最初的状态；
+```kotlin
+根据 active 进行赋值，atomic 方法请看 https://github.com/Kotlin/kotlinx.atomicfu
+private val _state = atomic<Any?>(if (active) EMPTY_ACTIVE else EMPTY_NEW)
+```
+上述两种状态指向的是同一个类: `Empty`，只有 `isActive` 字段不同；
+```kotlin
+private class Empty(override val isActive: Boolean) : Incomplete {
+    override val list: NodeList? get() = null
+    override fun toString(): String = "Empty{${if (isActive) "Active" else "New" }}"
+}
+```
+很多状态都实现了 `InComplete` 接口，用于标记当前协程还未结束；
+```kotlin
+internal interface Incomplete {
+    // 标记当前协程是否可用
+    val isActive: Boolean
+    // 似乎是一个线程安全的不可删除节点的链表，没有细究；
+    val list: NodeList? // is null only for Empty and JobNode incomplete state objects
+}
+```
+#### SINGLE
+当前协程处于`Empty_Active` 状态时，子协程调用 `attachChild` 方法，最后调用到 `invokeOnCompletion` 方法；
+```kotlin
+val node: JobNode = makeNode(handler, onCancelling)
+when (state) {
+                is Empty -> { // EMPTY_X state -- no completion handlers
+                    if (state.isActive) {
+                        // 处于`Empty_Active` 状态，直接将`_state`设置为 `JobNode`，称之为 `Single` 状态；
+                        if (_state.compareAndSet(state, node)) return node
+                    } else
+                        ...
+}                       
+```
+#### LIST_N
+当前协程处于 `Empty_New` 状态时，子协程调用 `attachChild` 方法，最后调用到 `invokeOnCompletion` 方法；
+```kotlin
+val node: JobNode = makeNode(handler, onCancelling)
+when (state) {
+                is Empty -> { 
+                    // Empty_New 状态，isActive 为 false
+                    if (state.isActive) {
+                        ...
+                    } else
+                        promoteEmptyToNodeList(state) // that way we can add listener for non-active coroutine
+                }
+}   
+
+private fun promoteEmptyToNodeList(state: Empty) {
+        // try to promote it to LIST state with the corresponding state
+        val list = NodeList()
+        // 此处 isActive 必为 false，将 `_state` 设置为 `InactiveNodeList`
+        val update = if (state.isActive) list else InactiveNodeList(list)
+        _state.compareAndSet(state, update)
+    }
+```
+
+#### Single+
+当协程处于 `Empty_Active` 状态，子协程调用 `attachChild` 方法，最后调用到 `invokeOnCompletion` 方法；
+```kotlin
+val node: JobNode = makeNode(handler, onCancelling)
+loopOnState { state ->
+    when (state) {
+        is Empty -> { // EMPTY_X state -- no completion handlers
+            if (state.isActive) {
+                ...
+            }
+        is Incomplete -> {
+            val list = state.list
+            if (list == null) { // SINGLE/SINGLE+
+                promoteSingleToNodeList(state as JobNode)
+            }
+}
+
+private fun promoteSingleToNodeList(state: JobNode) {
+    // try to promote it to list (SINGLE+ state)
+    state.addOneIfEmpty(NodeList())
+    // it must be in SINGLE+ state or state has changed (node could have need removed from state)
+    val list = state.nextNode // either our NodeList or somebody else won the race, updated state
+    // just attempt converting it to list if state is still the same, then we'll continue lock-free loop
+    _state.compareAndSet(state, list)
+}
+```
+把 `_state` 设置为 `NodeList`;
+
+#### List_A
+当前协程处于 `List_N` 或 `Single+` 时，子协程调用 `attachChild` 方法，最后调用到 `invokeOnCompletion` 方法；
+```kotlin
+val node: JobNode = makeNode(handler, onCancelling)
+loopOnState { state ->
+    when (state) {
+        is Empty -> { // EMPTY_X state -- no completion handlers
+            ...
+        }
+        is Incomplete -> {
+            val list = state.list
+            if (list == null) {
+                ... 
+            } else {
+                var rootCause: Throwable? = null
+                var handle: DisposableHandle = NonDisposableHandle
+                ...
+                if (rootCause != null) {
+                    ...    
+                } else {
+                    if (addLastAtomic(state, list, node)) return node
+                }
+        }
+    }
+}
+
+// 如果两个 state 引用相同，则把 node 添加到 list 的最后
+private fun addLastAtomic(expect: Any, list: NodeList, node: JobNode) =
+    list.addLastIf(node) { this.state === expect }
+```
+
+#### Cancelling 
+`Job` 主动调用 `cancel` 方法，或者子协程发生异常取消当前协程，或者父协程取消当前协程；这三种情况都会调用 `cancelImpl` 方法；
+```kotlin
+internal fun cancelImpl(cause: Any?): Boolean {
+    var finalState: Any? = COMPLETING_ALREADY
+    // 默认为 false，在 JobImpl 中重载为 true
+    if (onCancelComplete) {
+        // make sure it is completing, if cancelMakeCompleting returns state it means it had make it
+        // completing and had recorded exception
+        finalState = cancelMakeCompleting(cause)
+        if (finalState === COMPLETING_WAITING_CHILDREN) return true
+    }
+    if (finalState === COMPLETING_ALREADY) {
+        finalState = makeCancelling(cause)
+    }
+    return when {
+        finalState === COMPLETING_ALREADY -> true
+        finalState === COMPLETING_WAITING_CHILDREN -> true
+        finalState === TOO_LATE_TO_CANCEL -> false
+        else -> {
+            afterCompletion(finalState)
+            true
+        }
+    }
+}
+
+private fun cancelMakeCompleting(cause: Any?): Any? {
+    loopOnState { state ->
+        if (state !is Incomplete || state is Finishing && state.isCompleting) {
+            // 如果当前协程已经结束，直接返回状态
+            return COMPLETING_ALREADY
+        }
+        // 包装异常
+        val proposedUpdate = CompletedExceptionally(createCauseException(cause))
+        // 等待解决子协程
+        val finalState = tryMakeCompleting(state, proposedUpdate)
+        if (finalState !== COMPLETING_RETRY) return finalState
+    }
+}
+```
+
+#### Completing
+在 `tryMakeCompletingSlowPath` 中 `state` 被置为 `Finishing`
+
+
+除了上述状态转变的逻辑，还有很大一部分是关于线程同步的逻辑，这方面没有细究；
 
 ### 小结
 
