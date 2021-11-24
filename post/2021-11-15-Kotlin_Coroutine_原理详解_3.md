@@ -219,3 +219,207 @@ BuildersKt.launch$default((CoroutineScope)GlobalScope.INSTANCE, (CoroutineContex
 2. 大状态机如何切换到小状态机，小状态机如何切回大状态机？
 
 
+## 状态机工作原理
+`BaseContinuationImpl` 是所有编译器自动生成的类的父类；
+
+```kotlin
+internal abstract class BaseContinuationImpl(
+    // 包裹当前状态机的上层状态机
+    public val completion: Continuation<Any?>?
+) : Continuation<Any?>, CoroutineStackFrame, Serializable {
+    // 最终实现，不允许重写；
+    public final override fun resumeWith(result: Result<Any?>) {
+      
+        var current = this
+        var param = result
+        while (true) {
+            // Invoke "resume" debug probe on every resumed continuation, so that a debugging library infrastructure
+            // can precisely track what part of suspended callstack was already resumed
+            probeCoroutineResumed(current)
+            with(current) {
+                val completion = completion!!
+                val outcome: Result<Any?> =
+                    try {
+                        val outcome = invokeSuspend(param)
+                        // 当前状态机调用了挂起函数，不能立即返回，停止循环；
+                        if (outcome === COROUTINE_SUSPENDED) return
+                        // 当前状态机达到最终状态，拿到了结果；
+                        Result.success(outcome)
+                    } catch (exception: Throwable) {
+                        Result.failure(exception)
+                    }
+                releaseIntercepted() // this state machine instance is terminating
+                // 当前状态机已结束，开始向上递归；
+                // 如果当前状态机是 BaseContinuationImpl 的子类，则改变 current 和 param 继续循环；
+                if (completion is BaseContinuationImpl) {
+                    // unrolling recursion via loop
+                    current = completion
+                    param = outcome
+                } else {
+                    // 达到顶层状态机，不是 BaseContinuationImpl 的子类，直接调用它的 resumeWith 函数；
+                    completion.resumeWith(outcome)
+                    return
+                }
+            }
+        }
+    }
+
+   // 包含状态机实现
+    protected abstract fun invokeSuspend(result: Result<Any?>): Any?
+
+    ......
+}
+```
+
+## 线程调度
+线程调度分为两个部分：
+1. 切到子状态机时，使用指定线程；
+2. 切回上层状态机时，变回原来的线程；
+
+```kotlin
+public suspend fun <T> withContext(
+    context: CoroutineContext,
+    block: suspend CoroutineScope.() -> T
+): T {
+    contract {
+        callsInPlace(block, InvocationKind.EXACTLY_ONCE)
+    }
+    // suspendCoroutineUninterceptedOrReturn 方法由编译器实现，uCont 指的是当前协程实例；
+    return suspendCoroutineUninterceptedOrReturn sc@ { uCont ->
+        // compute new context
+        val oldContext = uCont.context
+        val newContext = oldContext + context
+        // always check for cancellation of new context
+        newContext.ensureActive()
+        // FAST PATH #1 -- new context is the same as the old one
+        if (newContext === oldContext) {
+            val coroutine = ScopeCoroutine(newContext, uCont)
+            return@sc coroutine.startUndispatchedOrReturn(coroutine, block)
+        }
+        // FAST PATH #2 -- the new dispatcher is the same as the old one (something else changed)
+        // `equals` is used by design (see equals implementation is wrapper context like ExecutorCoroutineDispatcher)
+        if (newContext[ContinuationInterceptor] == oldContext[ContinuationInterceptor]) {
+            val coroutine = UndispatchedCoroutine(newContext, uCont)
+            // There are changes in the context, so this thread needs to be updated
+            withCoroutineContext(newContext, null) {
+                return@sc coroutine.startUndispatchedOrReturn(coroutine, block)
+            }
+        }
+        // SLOW PATH -- use new dispatcher
+        val coroutine = DispatchedCoroutine(newContext, uCont)
+        block.startCoroutineCancellable(coroutine, coroutine)
+        coroutine.getResult()
+    }
+}
+
+// 
+internal fun <R, T> (suspend (R) -> T).startCoroutineCancellable(
+    receiver: R, completion: Continuation<T>,
+    onCancellation: ((cause: Throwable) -> Unit)? = null
+) =
+    runSafely(completion) {
+        createCoroutineUnintercepted(receiver, completion).intercepted().resumeCancellableWith(Result.success(Unit), onCancellation)
+    }
+
+// 内部实现
+public actual fun <R, T> (suspend R.() -> T).createCoroutineUnintercepted(
+    receiver: R,
+    completion: Continuation<T>
+): Continuation<Unit> {
+    val probeCompletion = probeCoroutineCreated(completion)
+    return if (this is BaseContinuationImpl)
+        create(receiver, probeCompletion)
+    else {
+        createCoroutineFromSuspendFunction(probeCompletion) {
+            (this as Function2<R, Continuation<T>, Any?>).invoke(receiver, it)
+        }
+    }
+}
+
+// ContinuationImpl.kt
+// 根据 ContinuationInterceptor 构建新的 Continuation
+public fun intercepted(): Continuation<Any?> =
+        intercepted
+            ?: (context[ContinuationInterceptor]?.interceptContinuation(this) ?: this)
+                .also { intercepted = it }
+
+// CoroutineDispatcher.kt
+// 构建 DispatchedContinuation 对象
+public final override fun <T> interceptContinuation(continuation: Continuation<T>): Continuation<T> =
+        DispatchedContinuation(this, continuation)
+
+// DispatchedContinuation.kt
+// 扩展方法，根据类型不同特殊处理；
+public fun <T> Continuation<T>.resumeCancellableWith(
+    result: Result<T>,
+    onCancellation: ((cause: Throwable) -> Unit)? = null
+): Unit = when (this) {
+    is DispatchedContinuation -> resumeCancellableWith(result, onCancellation)
+    else -> resumeWith(result)
+}
+
+// DispatchedContinuation.kt
+    inline fun resumeCancellableWith(
+        result: Result<T>,
+        noinline onCancellation: ((cause: Throwable) -> Unit)?
+    ) {
+        val state = result.toState(onCancellation)
+        // dispatcher 是 CoroutineDispatcher 的子类，通过构造函数传入；
+        if (dispatcher.isDispatchNeeded(context)) {
+            _state = state
+            resumeMode = MODE_CANCELLABLE
+            dispatcher.dispatch(context, this)
+        } else {
+            executeUnconfined(state, MODE_CANCELLABLE) {
+                if (!resumeCancelled(state)) {
+                    resumeUndispatchedWith(result)
+                }
+            }
+        }
+    }
+// CoroutineDispatcher.kt
+// DispatchedContinuation 的父类 DispatchedTask 实现了 runnable 接口；
+public abstract fun dispatch(context: CoroutineContext, block: Runnable)
+
+// LimitingDispatcher.kt
+// 这个类实现了线程池的相关功能
+```
+
+
+```kotlin
+// DispatchedContinuation.kt
+override fun resumeWith(result: Result<T>) {
+        val context = continuation.context
+        val state = result.toState()
+        // 执行状态机，继续分发到线程池
+        if (dispatcher.isDispatchNeeded(context)) {
+            _state = state
+            resumeMode = MODE_ATOMIC
+            dispatcher.dispatch(context, this)
+        } else {
+           // 状态机结束，调用上层状态机 DispatchedCoroutine 的 resumeWith 方法, 此时仍然在线程池中调用这一方法；
+            executeUnconfined(state, MODE_ATOMIC) {
+                withCoroutineContext(this.context, countOrElement) {
+                    continuation.resumeWith(result)
+                }
+            }
+        }
+    }
+
+// AbstractCoroutine.kt
+public final override fun resumeWith(result: Result<T>) {
+        val state = makeCompletingOnce(result.toState())
+        if (state === COMPLETING_WAITING_CHILDREN) return
+        afterResume(state)
+    }
+
+protected open fun afterResume(state: Any?): Unit = afterCompletion(state)
+
+// DispatchedCoroutine.kt
+// 切回之前的线程
+override fun afterResume(state: Any?) {
+        if (tryResume()) return // completed before getResult invocation -- bail out
+        // Resume in a cancellable way because we have to switch back to the original dispatcher
+        uCont.intercepted().resumeCancellableWith(recoverResult(state, uCont))
+    }
+```
